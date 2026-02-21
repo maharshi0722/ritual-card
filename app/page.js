@@ -4,12 +4,21 @@ import React, { useMemo, useRef, useState, useCallback } from "react";
 import * as htmlToImage from "html-to-image";
 
 /**
- * Cross-platform download strategy (simplified):
+ * Cross-platform download strategy (v3 — iOS Chrome fixed):
  *
- * 1. Generate image as Blob via html-to-image (toBlob, pixelRatio 3, retry at 2)
- * 2. Desktop / Android: <a download> click → immediate file save (single click)
- * 3. iOS Safari: <a download> is unreliable, so open blob in new tab
- *    for long-press → "Save Image". Tab opens AFTER blob is ready.
+ * ALL iOS browsers (Safari, Chrome, Firefox, Edge) use WebKit internally.
+ * WebKit limitations:
+ *   - <a download="..."> is IGNORED (no programmatic file download)
+ *   - Blob object URLs don't survive across browsing contexts (new tabs)
+ *
+ * Strategy:
+ *   1. Render card → Blob via html-to-image
+ *   2. Desktop / Android: <a download> → instant single-click file save
+ *   3. iOS (ALL browsers):
+ *      a. Open blank tab SYNCHRONOUSLY (before any async) to beat popup blockers
+ *      b. Convert blob → base64 data URL (survives cross-context)
+ *      c. Write image into the pre-opened tab
+ *      d. User long-presses → "Save to Photos" / "Add to Photos"
  */
 
 const roleConfig = {
@@ -18,7 +27,7 @@ const roleConfig = {
   Ritty:              { stars: 3, rarity: "RARE",        emoji: "🕯️", color: "#AA66FF", colorDark: "#553399" },
   Mage:               { stars: 3, rarity: "MAGE",        emoji: "🔮", color: "#CC44FF", colorDark: "#6622AA" },
   Ritualist:          { stars: 4, rarity: "EPIC",        emoji: "🔥", color: "#FF8833", colorDark: "#CC4400" },
-  "Radiant Ritualist":{ stars: 5, rarity: "LEGENDARY",  emoji: "✦",  color: "#FFD700", colorDark: "#996600" },
+  "Radiant Ritualist":{ stars: 5, rarity: "LEGENDARY",  emoji: "��",  color: "#FFD700", colorDark: "#996600" },
 };
 
 const FONT_SANS  = 'ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji"';
@@ -73,6 +82,16 @@ function getUA() {
   return { ios, android, mobile: ios || android };
 }
 
+/** Blob → base64 data URL (required for iOS — objectURLs don't work cross-context) */
+function blobToDataURL(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload  = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
 /** Generate blob from the card element with automatic retry at lower resolution */
 async function renderCardBlob(element, bgColor) {
   try {
@@ -87,7 +106,6 @@ async function renderCardBlob(element, bgColor) {
   } catch {
     // Fall through to retry
   }
-  // Retry at lower resolution
   const blob = await htmlToImage.toBlob(element, {
     pixelRatio: 2,
     cacheBust: true,
@@ -115,17 +133,19 @@ function anchorDownload(blob, filename) {
   });
 }
 
-/** iOS fallback: open image in new tab for long-press save */
-function openImageInNewTab(blob, filename) {
-  const url = URL.createObjectURL(blob);
-  const tab = window.open("", "_blank");
-  if (!tab) {
-    // Popup blocked — navigate current window as last resort
-    window.location.href = url;
+/**
+ * Write a full image page into a pre-opened tab.
+ * Uses base64 data URL so it works in ALL iOS browsers (Safari, Chrome, Firefox).
+ * ObjectURLs break across browsing contexts on WebKit.
+ */
+function fillTabWithImage(tab, dataURL, filename) {
+  if (!tab || tab.closed) {
+    // Popup was blocked — try opening directly (may also be blocked)
+    try { window.open(dataURL, "_blank"); } catch {}
     return;
   }
   try {
-    tab.document.write(`<!DOCTYPE html>
+    const html = `<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8">
@@ -134,21 +154,40 @@ function openImageInNewTab(blob, filename) {
   <style>
     *{margin:0;padding:0;box-sizing:border-box}
     body{background:#111;display:flex;flex-direction:column;align-items:center;
-         justify-content:center;min-height:100vh;font-family:sans-serif;color:#fff;padding:16px}
-    img{max-width:100%;max-height:80vh;border-radius:12px;
-        box-shadow:0 8px 40px rgba(0,0,0,0.6)}
-    p{margin-top:18px;font-size:15px;opacity:.75;text-align:center;line-height:1.5}
+         justify-content:center;min-height:100vh;font-family:-apple-system,sans-serif;
+         color:#fff;padding:20px;-webkit-user-select:none;user-select:none}
+    .wrap{position:relative;display:inline-block}
+    img{max-width:100%;max-height:75vh;border-radius:12px;
+        box-shadow:0 8px 40px rgba(0,0,0,0.6);display:block;
+        -webkit-touch-callout:default!important}
+    .badge{position:absolute;top:12px;right:12px;background:rgba(0,0,0,.7);
+           color:#FFD700;font-size:11px;font-weight:700;padding:6px 14px;
+           border-radius:20px;backdrop-filter:blur(8px);
+           -webkit-backdrop-filter:blur(8px);letter-spacing:.5px}
+    p{margin-top:20px;font-size:15px;opacity:.8;text-align:center;line-height:1.6}
     strong{color:#FFD700}
+    .arrow{font-size:28px;animation:bounce 1.2s infinite}
+    @keyframes bounce{0%,100%{transform:translateY(0)}50%{transform:translateY(-6px)}}
   </style>
 </head>
 <body>
-  <img src="${url}" alt="Ritual Card">
-  <p><strong>📸 Long-press the image → "Save to Photos"</strong></p>
+  <div class="wrap">
+    <img src="${dataURL}" alt="Ritual Card">
+    <div class="badge">📸 Hold to save</div>
+  </div>
+  <p>
+    <span class="arrow">👇</span><br>
+    <strong>Long-press the image</strong><br>
+    then tap <strong>"Save to Photos"</strong> or <strong>"Save Image"</strong>
+  </p>
 </body>
-</html>`);
+</html>`;
+    tab.document.open();
+    tab.document.write(html);
     tab.document.close();
   } catch {
-    tab.location.href = url;
+    // Cross-origin restriction — navigate directly to data URL
+    try { tab.location.href = dataURL; } catch {}
   }
 }
 
@@ -224,6 +263,41 @@ export default function RitualCardGenerator() {
     const { ios } = getUA();
     const filename = `ritual-card-${profile.username || "card"}.png`;
 
+    // ── iOS (ALL browsers): open blank tab NOW synchronously ──────────────────
+    // This MUST happen in the synchronous click handler call stack.
+    // If we await anything first, WebKit treats window.open() as a popup
+    // and blocks it — especially in Chrome on iOS.
+    let preTab = null;
+    if (ios) {
+      try {
+        preTab = window.open("about:blank", "_blank");
+      } catch {
+        preTab = null;
+      }
+      // Write a loading state into the tab so it's not blank
+      if (preTab && !preTab.closed) {
+        try {
+          preTab.document.write(`<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Preparing image…</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#111;display:flex;align-items:center;justify-content:center;
+       min-height:100vh;font-family:-apple-system,sans-serif;color:#fff}
+  .loader{text-align:center}
+  .spinner{width:40px;height:40px;border:3px solid rgba(255,255,255,.15);
+           border-top-color:#FFD700;border-radius:50%;margin:0 auto 16px;
+           animation:spin .8s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  p{font-size:15px;opacity:.7}
+</style></head><body>
+<div class="loader"><div class="spinner"></div><p>Generating your card…</p></div>
+</body></html>`);
+          preTab.document.close();
+        } catch {}
+      }
+    }
+
     setExporting(true);
     setExportStatus("Rendering…");
 
@@ -237,30 +311,47 @@ export default function RitualCardGenerator() {
       const blob = await renderCardBlob(stageRef.current, LIGHT.bg);
 
       if (ios) {
-        // iOS Safari doesn't support <a download> reliably
-        setExportStatus("Opening image…");
-        openImageInNewTab(blob, filename);
-        setExportStatus("Long-press the image to save it");
+        // ── iOS path: convert to base64 data URL (objectURLs break cross-tab) ──
+        setExportStatus("Preparing image…");
+        const dataURL = await blobToDataURL(blob);
+        fillTabWithImage(preTab, dataURL, filename);
+        setExportStatus("Long-press the image to save it ✓");
       } else {
-        // Android + Desktop: direct single-click download
+        // ── Android + Desktop: direct single-click download ─────────────────────
         setExportStatus("Downloading…");
         anchorDownload(blob, filename);
-        setExportStatus("Downloaded!");
+        setExportStatus("Downloaded! ✓");
       }
     } catch (err) {
       console.error("[RitualCard] download error:", err);
-      setExportStatus("Export failed — try again");
+
+      // Clean up the pre-opened tab on error
+      if (preTab && !preTab.closed) {
+        try {
+          preTab.document.open();
+          preTab.document.write(`<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>*{margin:0;padding:0;box-sizing:border-box}
+body{background:#111;display:flex;align-items:center;justify-content:center;
+     min-height:100vh;font-family:-apple-system,sans-serif;color:#fff;padding:24px;text-align:center}
+p{font-size:16px;line-height:1.6}strong{color:#ff6b6b}</style></head>
+<body><p><strong>Export failed</strong><br>Please go back and try again.</p></body></html>`);
+          preTab.document.close();
+        } catch {}
+      }
+
+      setExportStatus("Export failed — tap to retry");
     } finally {
       setExporting(false);
-      setTimeout(() => setExportStatus(""), 4000);
+      setTimeout(() => setExportStatus(""), 5000);
     }
   }, [exporting, profile.username]);
 
   const { ios, android } = getUA();
   const btnLabel = exporting
     ? (exportStatus || "Exporting…")
-    : ios     ? "💾 Save (iOS)"
-    : android ? "💾 Download (Android)"
+    : ios     ? "💾 Save Image"
+    : android ? "💾 Download"
     :           "⬇ Download HD";
 
   return (
