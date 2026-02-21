@@ -4,12 +4,18 @@ import React, { useMemo, useRef, useState } from "react";
 import * as htmlToImage from "html-to-image";
 
 /**
- * Light theme (like your earlier version) + "middle card with surrounding glow" like image8.
- * - Page is LIGHT (not dark).
- * - Export includes the surrounding glow area (stage) + centered card.
- * - Gold frame + inner tech border like the reference.
- * - Stats: ONLY FOLLOWERS (removed following/posts).
- * - No external Google Fonts (prevents cssRules SecurityError).
+ * FIXES / IMPROVEMENTS
+ * 1) Better UI polish (spacing, buttons, header alignment)
+ * 2) Download works on:
+ *    - Android/Chrome: normal file download via <a download> with Blob URL
+ *    - Desktop: same as above
+ *    - iOS Safari: uses Web Share API if available, otherwise opens image in new tab for Save Image
+ * 3) Keeps LIGHT theme like your earlier version
+ * 4) Exports the "stage" (surrounding glow + card in middle)
+ * 5) Card header logo + title centered
+ * 6) Stats: ONLY FOLLOWERS
+ *
+ * IMPORTANT: To avoid SecurityError (cssRules), DO NOT load external CSS stylesheets (Google Fonts) globally.
  */
 
 const roleConfig = {
@@ -25,7 +31,6 @@ const FONT_SANS =
   'ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji"';
 const FONT_MONO =
   'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace';
-// Tech-ish, export-safe
 const FONT_TECH = `"Bahnschrift", "DIN Alternate", "Segoe UI", ${FONT_SANS}`;
 
 const LIGHT = {
@@ -69,6 +74,15 @@ async function waitForImages(rootEl) {
       } catch {}
     })
   );
+}
+
+function isIOS() {
+  if (typeof navigator === "undefined") return false;
+  return /iP(ad|hone|od)/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+}
+
+function blobToObjectURL(blob) {
+  return URL.createObjectURL(blob);
 }
 
 export default function RitualCardGenerator() {
@@ -120,6 +134,7 @@ export default function RitualCardGenerator() {
 
       if (data?.user) {
         const u = data.user;
+
         displayName = u.name || username;
 
         avatarUrl =
@@ -168,26 +183,51 @@ export default function RitualCardGenerator() {
 
     try {
       setExporting(true);
-      await new Promise((r) => setTimeout(r, 80));
+
+      // give layout a moment + make sure images decoded
+      await new Promise((r) => setTimeout(r, 120));
       await waitForImages(stageRef.current);
 
-      const dataUrl = await htmlToImage.toPng(stageRef.current, {
-        pixelRatio: 4,
+      // Prefer Blob for mobile reliability
+      const blob = await htmlToImage.toBlob(stageRef.current, {
+        pixelRatio: 3, // good quality + safer memory on mobile; increase to 4 if device can handle
         cacheBust: true,
-        backgroundColor: LIGHT.bg, // light export background
-        skipFonts: true, // helps avoid cssRules SecurityError in some setups
+        backgroundColor: LIGHT.bg,
+        skipFonts: true,
         fetchRequestInit: { mode: "cors", cache: "no-store" },
       });
 
+      if (!blob) throw new Error("Blob export failed");
+
+      const fileName = `ritual-card-${profile.username || "card"}.png`;
+
+      // iOS best: Share sheet (saves to Photos/Files)
+      const file = new File([blob], fileName, { type: "image/png" });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({ files: [file], title: "Ritual Card" });
+        return;
+      }
+
+      const url = blobToObjectURL(blob);
+
+      // iOS fallback: open image tab (long press -> Save Image)
+      if (isIOS()) {
+        window.open(url, "_blank", "noopener,noreferrer");
+        setTimeout(() => URL.revokeObjectURL(url), 60_000);
+        return;
+      }
+
+      // Android/desktop: real download
       const a = document.createElement("a");
-      a.download = `ritual-card-${profile.username || "card"}.png`;
-      a.href = dataUrl;
+      a.href = url;
+      a.download = fileName;
+      document.body.appendChild(a);
       a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
     } catch (e) {
       console.error(e);
-      alert(
-        "Download failed (SecurityError).\nFix: remove any external <link rel='stylesheet'> (Google fonts/CDN CSS) from your app layout. Use system/self-hosted fonts."
-      );
+      alert("Export failed. If you are on iOS, try again and use the Share / Save Image flow.");
     } finally {
       setExporting(false);
     }
@@ -195,7 +235,6 @@ export default function RitualCardGenerator() {
 
   return (
     <div style={styles.page}>
-      {/* light ambient background */}
       <div style={styles.ambientBg} aria-hidden="true" />
 
       <header style={styles.header}>
@@ -272,7 +311,6 @@ export default function RitualCardGenerator() {
 
       {showCard && cfg && (
         <section style={styles.cardWrap}>
-          {/* Export stage includes the surrounding glow AND card centered */}
           <div ref={stageRef} style={styles.exportStage}>
             <div style={styles.exportAmbient} aria-hidden="true" />
 
@@ -287,10 +325,9 @@ export default function RitualCardGenerator() {
               <div style={{ ...styles.cornerSpark, right: 14, bottom: 14 }}>✦</div>
 
               <div style={styles.card}>
-                <div style={styles.techTopNotch} aria-hidden="true" />
 
                 <div style={styles.cardHeader}>
-                  <div style={styles.ritualLogoRow}>
+                  <div style={styles.cardHeaderCenter}>
                     <img src="/logo.png" alt="Ritual" style={styles.cardLogoImg} />
                     <span style={styles.ritualLogoText}>RITUAL</span>
                   </div>
@@ -315,7 +352,6 @@ export default function RitualCardGenerator() {
                       )}
                     </div>
                   </div>
-
                   <div style={styles.sideHandle}>@{profile.username}</div>
                 </div>
 
@@ -330,7 +366,6 @@ export default function RitualCardGenerator() {
                     <span style={{ ...styles.roleLabel, ...badgeStyle }}>{selectedRole.toUpperCase()}</span>
                   </div>
 
-                  {/* ONLY Followers */}
                   {profile.followers !== null && (
                     <div style={styles.statsRowSingle}>
                       <div style={styles.statItem}>
@@ -359,12 +394,14 @@ export default function RitualCardGenerator() {
 
           <div style={styles.actions}>
             <button type="button" onClick={download} style={{ ...styles.downloadBtn, opacity: exporting ? 0.7 : 1 }}>
-              {exporting ? "Exporting..." : "Download HD"}
+              {exporting ? "Exporting..." : isIOS() ? "Save (iOS)" : "Download HD"}
             </button>
             <button type="button" onClick={reset} style={styles.secondaryBtn}>
               Make another
             </button>
           </div>
+
+          {isIOS() && <div style={styles.iosHint}>Tip: “Save (iOS)” opens the image or share sheet to save to Photos.</div>}
         </section>
       )}
     </div>
@@ -385,20 +422,18 @@ const styles = {
     color: LIGHT.text,
   },
 
-  // light ambient background (view)
   ambientBg: {
     position: "fixed",
     inset: 0,
     pointerEvents: "none",
     background:
       "radial-gradient(900px 600px at 20% 0%, rgba(123,47,255,0.12), transparent 60%), radial-gradient(900px 600px at 80% 10%, rgba(255,47,154,0.10), transparent 55%), radial-gradient(900px 700px at 50% 90%, rgba(255,184,0,0.16), transparent 62%)",
-    opacity: 1,
   },
 
   header: { textAlign: "center", marginBottom: 16, position: "relative", zIndex: 2 },
   brandRow: { display: "flex", alignItems: "center", justifyContent: "center", gap: 10 },
-  siteLogo: { width: 40, height: 40, objectFit: "contain", filter: "drop-shadow(0 0 14px rgba(255,184,0,0.20))" },
-  h1: { margin: 0, fontSize: 28, letterSpacing: 0.9, fontWeight: 650, color: LIGHT.text, fontFamily: FONT_TECH },
+  siteLogo: { width: 44, height: 44, objectFit: "contain", filter: "drop-shadow(0 0 14px rgba(255,184,0,0.20))" },
+  h1: { margin: 0, fontSize: 30, letterSpacing: 1.0, fontWeight: 750, color: LIGHT.text, fontFamily: FONT_TECH },
   h1Span: {
     background: "linear-gradient(135deg,#7B2FFF,#FF2F9A)",
     WebkitBackgroundClip: "text",
@@ -408,10 +443,10 @@ const styles = {
 
   panel: {
     width: "100%",
-    maxWidth: 520,
+    maxWidth: 560,
     background: LIGHT.surface,
     border: "1px solid rgba(123,47,255,0.10)",
-    borderRadius: 18,
+    borderRadius: 20,
     padding: 22,
     boxShadow: "0 18px 60px rgba(20,10,0,0.10)",
     backdropFilter: "blur(10px)",
@@ -420,17 +455,18 @@ const styles = {
   },
 
   formGroup: { marginBottom: 16, textAlign: "left" },
-  label: { display: "block", fontSize: 12, letterSpacing: 0.2, fontWeight: 700, color: LIGHT.muted, marginBottom: 8 },
+  label: { display: "block", fontSize: 12, letterSpacing: 0.2, fontWeight: 800, color: LIGHT.muted, marginBottom: 8 },
+
   inputWrap: {
     display: "flex",
     border: "1px solid rgba(0,0,0,0.10)",
     borderRadius: 12,
     overflow: "hidden",
-    background: "rgba(255,255,255,0.8)",
+    background: "rgba(255,255,255,0.86)",
   },
   atPrefix: {
     padding: "12px 12px",
-    fontWeight: 700,
+    fontWeight: 900,
     color: LIGHT.purple,
     background: "rgba(123,47,255,0.06)",
     borderRight: "1px solid rgba(0,0,0,0.08)",
@@ -443,10 +479,10 @@ const styles = {
     overflow: "hidden",
     borderRadius: 12,
     border: "1px solid rgba(0,0,0,0.10)",
-    background: "rgba(255,255,255,0.8)",
+    background: "rgba(255,255,255,0.86)",
     padding: "12px 12px",
     cursor: "pointer",
-    fontWeight: 650,
+    fontWeight: 900,
     color: LIGHT.text,
   },
   roleBtnActive: { color: "white", transform: "translateY(-1px)" },
@@ -459,13 +495,14 @@ const styles = {
     cursor: "pointer",
     borderRadius: 12,
     padding: "14px 14px",
-    fontWeight: 650,
-    letterSpacing: 0.4,
+    fontWeight: 900,
+    letterSpacing: 0.5,
     color: "white",
     background: "linear-gradient(135deg,#7B2FFF,#FF2F9A)",
     boxShadow: "0 14px 36px rgba(123,47,255,0.18)",
     fontFamily: FONT_TECH,
   },
+
   errorMsg: {
     marginTop: 12,
     padding: "10px 12px",
@@ -479,10 +516,9 @@ const styles = {
 
   cardWrap: { marginTop: 18, display: "flex", flexDirection: "column", alignItems: "center", gap: 16, position: "relative", zIndex: 2 },
 
-  // EXPORT STAGE: includes surrounding warm glow but on LIGHT page
   exportStage: {
     width: "min(720px, 96vw)",
-    padding: "42px 18px",
+    padding: "44px 18px",
     borderRadius: 28,
     position: "relative",
     display: "flex",
@@ -496,10 +532,8 @@ const styles = {
     position: "absolute",
     inset: 0,
     pointerEvents: "none",
-    // light edges + warm gold center like image8
     background:
       "radial-gradient(780px 520px at 50% 60%, rgba(255,184,0,0.45), transparent 60%), radial-gradient(900px 620px at 70% 65%, rgba(255,214,122,0.24), transparent 65%), radial-gradient(900px 700px at 35% 68%, rgba(123,47,255,0.14), transparent 68%), radial-gradient(1200px 900px at 50% 10%, rgba(255,255,255,0.85), rgba(247,245,255,0.95) 60%)",
-    opacity: 1,
   },
 
   cardOuter: {
@@ -551,7 +585,6 @@ const styles = {
     userSelect: "none",
   },
 
-  // Dark plate INSIDE the gold frame (matches your reference vibe)
   card: {
     position: "relative",
     zIndex: 5,
@@ -560,7 +593,6 @@ const styles = {
     background: "linear-gradient(180deg, #1B1B1F 0%, #111114 100%)",
     border: "1px solid rgba(0,0,0,0.35)",
     boxShadow: "inset 0 1px 0 rgba(255,255,255,0.06)",
-    fontFamily: FONT_SANS,
   },
 
   techTopNotch: {
@@ -579,18 +611,24 @@ const styles = {
 
   cardHeader: {
     padding: "12px 14px",
+    position: "relative",
     display: "flex",
     alignItems: "center",
-    justifyContent: "space-between",
+    justifyContent: "center",
     background: "linear-gradient(135deg, rgba(255,184,0,0.14), rgba(123,47,255,0.10))",
     borderBottom: "1px solid rgba(255,255,255,0.08)",
   },
 
-  ritualLogoRow: { display: "flex", alignItems: "center", gap: 10 },
-  cardLogoImg: { width: 26, height: 26, objectFit: "contain", filter: "drop-shadow(0 0 10px rgba(255,184,0,0.22))" },
-  ritualLogoText: { fontWeight: 650, letterSpacing: 2.6, fontSize: 13, color: "rgba(255,184,0,0.95)", fontFamily: FONT_TECH },
+  cardHeaderCenter: { display: "flex", alignItems: "center", gap: 10 },
+
+  cardLogoImg: { width: 28, height: 28, objectFit: "contain", filter: "drop-shadow(0 0 10px rgba(255,184,0,0.22))" },
+  ritualLogoText: { fontWeight: 800, letterSpacing: 2.8, fontSize: 14, color: "rgba(255,184,0,0.95)", fontFamily: FONT_TECH },
 
   badge: {
+    position: "absolute",
+    right: 14,
+    top: "50%",
+    transform: "translateY(-50%)",
     fontSize: 10,
     border: "1px solid rgba(255,255,255,0.18)",
     borderRadius: 999,
@@ -604,7 +642,7 @@ const styles = {
   cardName: {
     padding: "14px 14px 12px",
     textAlign: "center",
-    fontWeight: 650,
+    fontWeight: 800,
     fontSize: 22,
     letterSpacing: 0.6,
     color: "rgba(230,240,255,0.95)",
@@ -655,7 +693,6 @@ const styles = {
     whiteSpace: "nowrap",
   },
 
-  // Light inner content panel
   cardBody: {
     padding: "14px 14px 16px",
     background: "linear-gradient(180deg, rgba(255,255,255,0.96), rgba(255,255,255,0.92))",
@@ -669,7 +706,7 @@ const styles = {
     border: "1px solid",
     borderRadius: 999,
     padding: "7px 16px",
-    fontWeight: 650,
+    fontWeight: 800,
     letterSpacing: 3.2,
     fontSize: 11,
     background: "rgba(255,255,255,0.75)",
@@ -678,8 +715,8 @@ const styles = {
 
   statsRowSingle: { display: "flex", justifyContent: "center", marginBottom: 12 },
   statItem: { textAlign: "center", minWidth: 160 },
-  statVal: { fontWeight: 650, fontSize: 22, color: LIGHT.purple, fontFamily: FONT_TECH, letterSpacing: 0.6 },
-  statLbl: { fontSize: 10, letterSpacing: 2.2, color: LIGHT.muted, fontWeight: 600, fontFamily: FONT_MONO },
+  statVal: { fontWeight: 800, fontSize: 22, color: LIGHT.purple, fontFamily: FONT_TECH, letterSpacing: 0.6 },
+  statLbl: { fontSize: 10, letterSpacing: 2.2, color: LIGHT.muted, fontWeight: 700, fontFamily: FONT_MONO },
 
   divider: { height: 1, background: "linear-gradient(90deg,transparent,rgba(0,0,0,0.14),transparent)", margin: "12px 0" },
 
@@ -690,8 +727,8 @@ const styles = {
     padding: "12px 12px",
     textAlign: "center",
   },
-  ritualModeLabel: { fontWeight: 650, color: LIGHT.purple, letterSpacing: 1.0, fontSize: 10, marginBottom: 6, fontFamily: FONT_TECH },
-  bioText: { color: "rgba(26,10,0,0.72)", fontStyle: "italic", fontWeight: 500, fontSize: 13, lineHeight: 1.35, fontFamily: FONT_SANS },
+  ritualModeLabel: { fontWeight: 800, color: LIGHT.purple, letterSpacing: 1.0, fontSize: 10, marginBottom: 6, fontFamily: FONT_TECH },
+  bioText: { color: "rgba(26,10,0,0.72)", fontStyle: "italic", fontWeight: 600, fontSize: 13, lineHeight: 1.35, fontFamily: FONT_SANS },
 
   cardFooter: {
     padding: "12px 14px",
@@ -702,30 +739,41 @@ const styles = {
     background: "linear-gradient(135deg, rgba(0,0,0,0.35), rgba(123,47,255,0.10))",
   },
 
-  footerLabel: { color: "rgba(255,184,0,0.55)", fontWeight: 650, letterSpacing: 1.6, fontSize: 10, fontFamily: FONT_TECH },
+  footerLabel: { color: "rgba(255,184,0,0.55)", fontWeight: 800, letterSpacing: 1.6, fontSize: 10, fontFamily: FONT_TECH },
   footerDot: { width: 7, height: 7, borderRadius: 999, background: LIGHT.pink, boxShadow: "0 0 12px rgba(255,47,154,0.25)" },
 
   actions: { display: "flex", gap: 12, flexWrap: "wrap", justifyContent: "center" },
+
   downloadBtn: {
     padding: "12px 18px",
     borderRadius: 12,
     border: "1px solid rgba(0,0,0,0.10)",
     background: "white",
     color: LIGHT.text,
-    fontWeight: 650,
+    fontWeight: 800,
     letterSpacing: 0.3,
     cursor: "pointer",
     boxShadow: "0 12px 28px rgba(20,10,0,0.10)",
     fontFamily: FONT_TECH,
   },
+
   secondaryBtn: {
     padding: "12px 18px",
     borderRadius: 12,
     border: "1px solid rgba(0,0,0,0.10)",
     background: "transparent",
     color: LIGHT.muted,
-    fontWeight: 650,
+    fontWeight: 800,
     cursor: "pointer",
     fontFamily: FONT_SANS,
+  },
+
+  iosHint: {
+    maxWidth: 560,
+    textAlign: "center",
+    fontSize: 12,
+    color: LIGHT.muted,
+    fontFamily: FONT_MONO,
+    lineHeight: 1.35,
   },
 };
