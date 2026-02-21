@@ -178,60 +178,64 @@ export default function RitualCardGenerator() {
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
-  async function download() {
-    if (!stageRef.current) return;
+ async function download() {
+  if (!stageRef.current) return;
 
-    try {
-      setExporting(true);
+  // IMPORTANT: open window immediately for iOS
+  const ios = isIOS();
+  const popup = ios ? window.open("", "_blank") : null;
 
-      // give layout a moment + make sure images decoded
-      await new Promise((r) => setTimeout(r, 120));
-      await waitForImages(stageRef.current);
+  try {
+    setExporting(true);
 
-      // Prefer Blob for mobile reliability
-      const blob = await htmlToImage.toBlob(stageRef.current, {
-        pixelRatio: 3, // good quality + safer memory on mobile; increase to 4 if device can handle
-        cacheBust: true,
-        backgroundColor: LIGHT.bg,
-        skipFonts: true,
-        fetchRequestInit: { mode: "cors", cache: "no-store" },
-      });
+    await new Promise((r) => setTimeout(r, 100));
+    await waitForImages(stageRef.current);
 
-      if (!blob) throw new Error("Blob export failed");
+    const blob = await htmlToImage.toBlob(stageRef.current, {
+      pixelRatio: 3,
+      backgroundColor: LIGHT.bg,
+      cacheBust: true,
+      skipFonts: true,
+    });
 
-      const fileName = `ritual-card-${profile.username || "card"}.png`;
+    if (!blob) throw new Error("Blob failed");
 
-      // iOS best: Share sheet (saves to Photos/Files)
-      const file = new File([blob], fileName, { type: "image/png" });
-      if (navigator.canShare && navigator.canShare({ files: [file] })) {
-        await navigator.share({ files: [file], title: "Ritual Card" });
-        return;
-      }
+    const fileName = `ritual-card-${profile.username || "card"}.png`;
+    const file = new File([blob], fileName, { type: "image/png" });
 
-      const url = blobToObjectURL(blob);
-
-      // iOS fallback: open image tab (long press -> Save Image)
-      if (isIOS()) {
-        window.open(url, "_blank", "noopener,noreferrer");
-        setTimeout(() => URL.revokeObjectURL(url), 60_000);
-        return;
-      }
-
-      // Android/desktop: real download
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = fileName;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 2000);
-    } catch (e) {
-      console.error(e);
-      alert("Export failed. If you are on iOS, try again and use the Share / Save Image flow.");
-    } finally {
-      setExporting(false);
+    // iOS share sheet (best)
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      await navigator.share({ files: [file], title: "Ritual Card" });
+      popup?.close();
+      return;
     }
+
+    const url = URL.createObjectURL(blob);
+
+    // iOS fallback: load image into already-opened tab
+    if (ios && popup) {
+      popup.location.href = url;
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      return;
+    }
+
+    // Desktop / Android
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+
+  } catch (e) {
+    console.error(e);
+    popup?.close();
+    alert("Export failed on iOS. Try again.");
+  } finally {
+    setExporting(false);
   }
+}
 
   return (
     <div style={styles.page}>
